@@ -87,12 +87,25 @@ chmod +x build-s3-dist.sh
 ## Deploy
 
 - Deploy the distributable to the Amazon S3 bucket in your account. Make sure you are uploading the files in `deployment/global-s3-assets` and `deployment/regional-s3-assets` to `$BUCKET_NAME/$SOLUTION_NAME/$VERSION`.
+
+**ggtt:**
+这里是指把两个目录里面的所有文件全部拷贝到上面的目录里面，而不要包括`global-s3-assets`和`regional-s3-assets`这两个目录，
+另外：如果cloudformation的启动出错，查看cloudformation的模板检查`*.zip`的文件所在。
 - Get the link of the solution template uploaded to your Amazon S3 bucket.
 - Deploy the solution to your account by launching a new AWS CloudFormation stack using the link of the solution template in Amazon S3.
 
 # Collection of operational metrics
 
 This solution collects anonymous operational metrics to help AWS improve the quality and features of the solution. For more information, including how to disable this capability, please see the [implementation guide](https://docs.aws.amazon.com/solutions/latest/serverless-image-handler/op-metrics.html).
+
+## GGTT:添加原始文件重试功能
+当图片上传到s3_upload_bucket之后，会触发lambda进行缩放图片到指定的尺寸以减少容量。但是这个过程会有时间损耗，从而在最终的目标s3_bucket_final里面没有文件存在。所以，当此项目需要拉起图片文件的时候，如果图片不存在，需要等待0.5秒再重试，直到5秒最高极限。
+注意：生成的cloudfront url是会缓存的，如果图片不存在被读取了也会缓存，即使后来图片补回去了也由于缓存而无法显示。
+
+## GGTT TODO:
+- 后续会添加签名功能，只需要简单的md5就行，不需要secret manager。因为secret manager的价格会很贵。
+- 把aws rekognition的功能去掉，用成人图片测试了，这个功能无用，而且价格也不便宜。
+
 
 # External Contributors
 

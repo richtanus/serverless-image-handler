@@ -19,6 +19,9 @@ type OriginalImageInfo = Partial<{
 export class ImageRequest {
   private static readonly DEFAULT_REDUCTION_EFFORT = 4;
 
+  public static readonly MAX_TRY = 10; // how many time it try to check if the file exist
+  public static readonly DIFF_TIME = 500; // ms diff after each tried
+
   constructor(private readonly s3Client: S3, private readonly secretProvider: SecretProvider) {}
 
   /**
@@ -37,6 +40,7 @@ export class ImageRequest {
       imageRequestInfo.key = this.parseImageKey(event, imageRequestInfo.requestType);
       imageRequestInfo.edits = this.parseImageEdits(event, imageRequestInfo.requestType);
 
+      //const isOriginalImageExist = await this.checkOriginalImage(imageRequestInfo.bucket, imageRequestInfo.key);
       const originalImage = await this.getOriginalImage(imageRequestInfo.bucket, imageRequestInfo.key);
       imageRequestInfo = { ...imageRequestInfo, ...originalImage };
 
@@ -101,46 +105,126 @@ export class ImageRequest {
    * @returns The original image or an error.
    */
   public async getOriginalImage(bucket: string, key: string): Promise<OriginalImageInfo> {
-    try {
-      const result: OriginalImageInfo = {};
 
-      const imageLocation = { Bucket: bucket, Key: key };
-      const originalImage = await this.s3Client.getObject(imageLocation).promise();
-      const imageBuffer = Buffer.from(originalImage.Body as Uint8Array);
+    // do a loop for multiple time checking
+    for(let i=1; i <= ImageRequest.MAX_TRY; i++){
 
-      if (originalImage.ContentType) {
-        // If using default S3 ContentType infer from hex headers
-        if (['binary/octet-stream', 'application/octet-stream'].includes(originalImage.ContentType)) {
-          result.contentType = this.inferImageType(imageBuffer);
+      try {
+        const result: OriginalImageInfo = {};
+
+        const imageLocation = { Bucket: bucket, Key: key };
+        const originalImage = await this.s3Client.getObject(imageLocation).promise();
+        const imageBuffer = Buffer.from(originalImage.Body as Uint8Array);
+
+        if (originalImage.ContentType) {
+          // If using default S3 ContentType infer from hex headers
+          if (['binary/octet-stream', 'application/octet-stream'].includes(originalImage.ContentType)) {
+            result.contentType = this.inferImageType(imageBuffer);
+          } else {
+            result.contentType = originalImage.ContentType;
+          }
         } else {
-          result.contentType = originalImage.ContentType;
+          result.contentType = 'image';
         }
-      } else {
-        result.contentType = 'image';
+
+        if (originalImage.Expires) {
+          result.expires = new Date(originalImage.Expires).toUTCString();
+        }
+
+        if (originalImage.LastModified) {
+          result.lastModified = new Date(originalImage.LastModified).toUTCString();
+        }
+
+        result.cacheControl = originalImage.CacheControl ?? 'max-age=31536000,public';
+        result.originalImage = imageBuffer;
+
+        return result;
+      } catch (error) {
+        let status = StatusCodes.INTERNAL_SERVER_ERROR;
+        let message = error.message;
+        if (error.code === 'NoSuchKey') {
+          status = StatusCodes.NOT_FOUND;
+          message = `The image ${key} does not exist or the request may not be base64 encoded properly.`;
+        }
+
+        // sleep for the diff time
+        await this.sleep(ImageRequest.DIFF_TIME);
+
+        if(i == ImageRequest.MAX_TRY){
+          throw new ImageHandlerError(status, error.code, message);
+        }
+
       }
 
-      if (originalImage.Expires) {
-        result.expires = new Date(originalImage.Expires).toUTCString();
-      }
-
-      if (originalImage.LastModified) {
-        result.lastModified = new Date(originalImage.LastModified).toUTCString();
-      }
-
-      result.cacheControl = originalImage.CacheControl ?? 'max-age=31536000,public';
-      result.originalImage = imageBuffer;
-
-      return result;
-    } catch (error) {
-      let status = StatusCodes.INTERNAL_SERVER_ERROR;
-      let message = error.message;
-      if (error.code === 'NoSuchKey') {
-        status = StatusCodes.NOT_FOUND;
-        message = `The image ${key} does not exist or the request may not be base64 encoded properly.`;
-      }
-      throw new ImageHandlerError(status, error.code, message);
     }
+
+
   }
+
+  /**
+   * check if an image exist in the bucket
+   *
+   * @param bucket
+   * @param key
+   * @returns the result that if the image exist
+   */
+  public async checkOriginalImage(bucket: string, key: string): Promise<boolean> {
+
+    let isImageExist = false;
+
+    // do a loop for multiple time checking
+    for(let i=1; i <= ImageRequest.MAX_TRY; i++){
+
+      try {
+        const result: OriginalImageInfo = {};
+
+        const imageLocation = { Bucket: bucket, Key: key };
+        const originalImage = await this.s3Client.getObject(imageLocation).promise();
+
+        isImageExist = true;
+        console.log('image is exist:'+key);
+
+      } catch (error) {
+        let status = StatusCodes.INTERNAL_SERVER_ERROR;
+        let message = error.message;
+        if (error.code === 'NoSuchKey') {
+          status = StatusCodes.NOT_FOUND;
+          message = `The image ${key} does not exist or the request may not be base64 encoded properly.`;
+          console.log('ggmessage:'+message);
+        }
+
+        // sleep some time then try it again
+        await this.sleep(ImageRequest.DIFF_TIME);
+        //throw new ImageHandlerError(status, error.code, message);
+      }
+
+      console.log("loop check time:"+i);
+
+      // if image already exist, then break out of for loop and return true
+      if(isImageExist){
+        return true;
+      }
+
+    }
+
+    // after max try and the image still not exist then return false
+    return false;
+
+  }
+
+
+  /**
+   * let the process sleep for interval milisecond
+   *
+   * @param interval ms time to sleep
+   * @returns
+   */
+  public sleep(interval: number) {
+    return new Promise(resolve => {
+        setTimeout(resolve, interval);
+    })
+  }
+
 
   /**
    * Parses the name of the appropriate Amazon S3 bucket to source the original image from.
